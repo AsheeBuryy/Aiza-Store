@@ -1,0 +1,147 @@
+{
+  "products": [
+    {
+      "id": "coffee-3in1",
+      "name": "3-in-1 Coffee",
+      "category": "Coffee & Drinks",
+      "price": 12,
+      "stock": 93,
+      "emoji": "☕",
+      "description": "A warm little pick-me-up for any time of day."
+    },
+    {
+      "id": "coffee-premix",
+      "name": "Coffee Mix",
+      "category": "Coffee & Drinks",
+      "price": 15,
+      "stock": 28,
+      "emoji": "🧋",
+      "description": "Creamy, comforting instant coffee."
+    },
+    {
+      "id": "biscuits-cream",
+      "name": "Cream Biscuits",
+      "category": "Biscuits & Snacks",
+      "price": 8,
+      "stock": 35,
+      "emoji": "🍪",
+      "description": "Crisp biscuits with a sweet cream center."
+    },
+    {
+      "id": "biscuits-crackers",
+      "name": "Salted Crackers",
+      "category": "Biscuits & Snacks",
+      "price": 7,
+      "stock": 30,
+      "emoji": "🥨",
+      "description": "A crunchy merienda-time favorite."
+    },
+    {
+      "id": "chips-corn",
+      "name": "Corn Chips",
+      "category": "Biscuits & Snacks",
+      "price": 10,
+      "stock": 24,
+      "emoji": "🌽",
+      "description": "Crunchy, savory chips for sharing."
+    },
+    {
+      "id": "instant-noodles",
+      "name": "Instant Noodles",
+      "category": "Pantry Staples",
+      "price": 15,
+      "stock": 36,
+      "emoji": "🍜",
+      "description": "A quick and easy pantry staple."
+    },
+    {
+      "id": "rice",
+      "name": "Rice (per kilo)",
+      "category": "Pantry Staples",
+      "price": 58,
+      "stock": 80,
+      "emoji": "🍚",
+      "description": "Everyday rice, sold by the kilo."
+    },
+    {
+      "id": "soy-sauce",
+      "name": "Soy Sauce",
+      "category": "Pantry Staples",
+      "price": 9,
+      "stock": 18,
+      "emoji": "🫙",
+      "description": "A savory kitchen essential."
+    },
+    {
+      "id": "vinegar",
+      "name": "Vinegar",
+      "category": "Pantry Staples",
+      "price": 9,
+      "stock": 16,
+      "emoji": "🥣",
+      "description": "A tangy everyday cooking staple."
+    },
+    {
+      "id": "soft-drink-cola",
+      "name": "Cola (bottle)",
+      "category": "Soft Drinks",
+      "price": 22,
+      "stock": 20,
+      "emoji": "🥤",
+      "description": "Chilled and refreshing, while stocks last."
+    },
+    {
+      "id": "soft-drink-orange",
+      "name": "Orange Soda",
+      "category": "Soft Drinks",
+      "price": 18,
+      "stock": 18,
+      "emoji": "🍊",
+      "description": "A bright, fizzy treat."
+    },
+    {
+      "id": "candy-fruit",
+      "name": "Fruit Candies",
+      "category": "Biscuits & Snacks",
+      "price": 1,
+      "stock": 70,
+      "emoji": "🍬",
+      "description": "A little sweet treat for the road."
+    },
+    {
+      "id": "nova-cfe60f",
+      "name": "Nova",
+      "category": "Biscuit",
+      "price": 18,
+      "stock": 50,
+      "emoji": "🛒",
+      "description": "An everyday store favorite."
+    }
+  ],
+  "transactions": [
+    {
+      "id": "AIZA-0F0B6F9974",
+      "type": "cash_order",
+      "status": "cancelled",
+      "amount": 27,
+      "description": "Cash order (2 items)",
+      "payment_method": "Cash at store",
+      "items": [
+        {
+          "id": "coffee-premix",
+          "name": "Coffee Mix",
+          "quantity": 1,
+          "unit_price": 15
+        },
+        {
+          "id": "coffee-3in1",
+          "name": "3-in-1 Coffee",
+          "quantity": 1,
+          "unit_price": 12
+        }
+      ],
+      "created_at": "2026-10-25T10:45:46.807Z",
+      "cancelled_at": "2026-10-25T10:46:36.655Z"
+    }
+  ]
+}
