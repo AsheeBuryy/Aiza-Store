@@ -81,6 +81,7 @@ function withStore(callable $callback): mixed
         if (!is_array($state) || !isset($state['products'], $state['transactions'])) {
             throw new RuntimeException('The store data file is invalid.');
         }
+        $state['gcash_number'] ??= '09302846922';
 
         $result = $callback($state);
         rewind($file);
@@ -229,13 +230,14 @@ function adminPayload(array $state): array
     return [
         'products' => $state['products'],
         'transactions' => array_reverse($state['transactions']),
+        'gcash_number' => $state['gcash_number'],
         'stats' => [
             'today_sales' => round(array_sum(array_map(static fn(array $transaction): float => $sales($transaction) ? (float)$transaction['amount'] : 0.0, $today)), 2),
             'total_sales' => round(array_sum(array_map(static fn(array $transaction): float => $sales($transaction) ? (float)$transaction['amount'] : 0.0, $state['transactions'])), 2),
             'cash_in_today' => round(array_sum(array_map(static fn(array $transaction): float => ($transaction['type'] ?? '') === 'cash_in' ? (float)$transaction['amount'] : 0.0, $today)), 2),
             'cash_out_today' => round(array_sum(array_map(static fn(array $transaction): float => ($transaction['type'] ?? '') === 'cash_out' ? (float)$transaction['amount'] : 0.0, $today)), 2),
             'low_stock_count' => count(array_filter($state['products'], static fn(array $product): bool => (int)$product['stock'] <= 5)),
-            'pending_payments' => count(array_filter($state['transactions'], static fn(array $transaction): bool => ($transaction['type'] ?? '') === 'payment' && ($transaction['status'] ?? '') === 'pending')),
+            'pending_payments' => count(array_filter($state['transactions'], static fn(array $transaction): bool => ($transaction['type'] ?? '') === 'payment' && ($transaction['payment_method'] ?? '') === 'Manual GCash' && ($transaction['status'] ?? '') === 'pending')),
             'pending_cash_orders' => count(array_filter($state['transactions'], static fn(array $transaction): bool => ($transaction['type'] ?? '') === 'cash_order' && ($transaction['status'] ?? '') === 'pending')),
         ],
     ];
@@ -249,37 +251,6 @@ function findProduct(array &$state, string $id): ?array
         }
     }
     return null;
-}
-
-function paymongoRequest(array $payload): array
-{
-    $secret = envValue('PAYMONGO_SECRET_KEY');
-    if ($secret === '') {
-        respond(503, ['error' => 'GCash checkout is not configured yet. Add the PayMongo secret key to the server environment and try again.']);
-    }
-
-    $context = stream_context_create([
-        'http' => [
-            'method' => 'POST',
-            'header' => "Authorization: Basic " . base64_encode($secret . ':') . "\r\nContent-Type: application/json\r\nAccept: application/json\r\n",
-            'content' => json_encode($payload, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE),
-            'timeout' => 15,
-            'ignore_errors' => true,
-        ],
-    ]);
-    $responseBody = @file_get_contents('https://api.paymongo.com/v1/checkout_sessions', false, $context);
-    if (!is_string($responseBody)) {
-        error_log('PayMongo checkout request failed before a response was received.');
-        respond(502, ['error' => 'PayMongo could not be reached. Please try again in a moment.']);
-    }
-
-    $response = json_decode($responseBody, true);
-    $statusLine = $http_response_header[0] ?? '';
-    if (!is_array($response) || !preg_match('/\s2\d\d\s/', $statusLine)) {
-        error_log('PayMongo checkout returned an unsuccessful response: ' . $statusLine);
-        respond(502, ['error' => 'PayMongo could not start checkout. Please check the merchant setup and try again.']);
-    }
-    return $response;
 }
 
 function verifyPaymongoWebhook(string $rawBody): void
@@ -321,8 +292,11 @@ if (!is_string($action)) {
 
 try {
     if ($action === 'products' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
-        $products = withStore(static fn(array &$state): array => $state['products']);
-        respond(200, ['products' => $products]);
+        $store = withStore(static fn(array &$state): array => [
+            'products' => $state['products'],
+            'gcash_number' => $state['gcash_number'],
+        ]);
+        respond(200, $store);
     }
 
     if ($action === 'login') {
@@ -420,9 +394,8 @@ try {
             respond(422, ['error' => 'Add at least one item to your basket before checkout.']);
         }
         $items = [];
-        $lineItems = [];
         $totalCents = 0;
-        withStore(static function (array &$state) use ($body, &$items, &$lineItems, &$totalCents): void {
+        withStore(static function (array &$state) use ($body, &$items, &$totalCents): void {
             $seen = [];
             foreach ($body['items'] as $requested) {
                 if (!is_array($requested) || !is_string($requested['id'] ?? null)
@@ -444,7 +417,6 @@ try {
                 }
                 $amountCents = (int)round((float)$product['price'] * 100);
                 $items[] = ['id' => $product['id'], 'name' => $product['name'], 'quantity' => $requested['quantity'], 'unit_price' => (float)$product['price']];
-                $lineItems[] = ['name' => $product['name'], 'quantity' => $requested['quantity'], 'amount' => $amountCents, 'currency' => 'PHP'];
                 $totalCents += $amountCents * $requested['quantity'];
             }
         });
@@ -466,36 +438,25 @@ try {
             respond(201, ['cash_order' => true, 'reference' => $reference]);
         }
 
-        $appUrl = rtrim(envValue('APP_URL', 'http://localhost:5173'), '/');
-        $response = paymongoRequest(['data' => ['attributes' => [
-            'line_items' => $lineItems,
-            'payment_method_types' => ['gcash'],
-            'description' => 'Aiza Gabutan Chang Store order ' . $reference,
-            'success_url' => $appUrl . '/?payment=success&ref=' . rawurlencode($reference),
-            'cancel_url' => $appUrl . '/?payment=cancelled&ref=' . rawurlencode($reference),
-            'metadata' => ['order_reference' => $reference],
-        ]]]);
-        $session = $response['data'] ?? [];
-        $checkoutUrl = $session['attributes']['checkout_url'] ?? '';
-        $checkoutId = $session['id'] ?? '';
-        if (!is_string($checkoutUrl) || !filter_var($checkoutUrl, FILTER_VALIDATE_URL) || !is_string($checkoutId) || $checkoutId === '') {
-            error_log('PayMongo returned a checkout session without a valid ID and checkout URL.');
-            respond(502, ['error' => 'PayMongo returned an incomplete checkout response. Please try again.']);
-        }
-        withStore(static function (array &$state) use ($items, $totalCents, $reference, $checkoutId): void {
+        $gcashNumber = withStore(static fn(array &$state): string => $state['gcash_number']);
+        withStore(static function (array &$state) use ($items, $totalCents, $reference): void {
             $state['transactions'][] = [
                 'id' => $reference,
-                'checkout_id' => $checkoutId,
                 'type' => 'payment',
                 'status' => 'pending',
                 'amount' => round($totalCents / 100, 2),
-                'description' => 'GCash checkout (' . count($items) . ' items)',
-                'payment_method' => 'PayMongo GCash',
+                'description' => 'GCash transfer (' . count($items) . ' items)',
+                'payment_method' => 'Manual GCash',
                 'items' => $items,
                 'created_at' => date(DATE_ATOM),
             ];
         });
-        respond(200, ['checkout_url' => $checkoutUrl, 'reference' => $reference]);
+        respond(201, [
+            'manual_gcash_order' => true,
+            'reference' => $reference,
+            'amount' => round($totalCents / 100, 2),
+            'gcash_number' => $gcashNumber,
+        ]);
     }
 
     if ($action === 'admin' && ($_SERVER['REQUEST_METHOD'] ?? 'GET') === 'GET') {
@@ -514,12 +475,71 @@ try {
         respond(200, ['success' => true]);
     }
 
-    $adminActions = ['cash_in', 'cash_out', 'restock', 'add_product', 'update_product', 'record_sale', 'confirm_cash_order', 'cancel_cash_order'];
+    $adminActions = ['cash_in', 'cash_out', 'restock', 'add_product', 'update_product', 'record_sale', 'confirm_cash_order', 'cancel_cash_order', 'confirm_gcash_payment', 'cancel_gcash_payment', 'update_gcash_number'];
     if (in_array($action, $adminActions, true)) {
         assertSameOrigin();
         requireAdmin();
         requireCsrf();
         $body = requirePost();
+
+        if (in_array($action, ['confirm_gcash_payment', 'cancel_gcash_payment'], true)) {
+            $transactionId = $body['transaction_id'] ?? '';
+            if (!is_string($transactionId) || $transactionId === '') {
+                respond(422, ['error' => 'Choose a GCash payment to update.']);
+            }
+            $result = withStore(static function (array &$state) use ($action, $transactionId): array {
+                $index = transactionIndex($state, $transactionId);
+                if ($index === null
+                    || ($state['transactions'][$index]['type'] ?? '') !== 'payment'
+                    || ($state['transactions'][$index]['payment_method'] ?? '') !== 'Manual GCash') {
+                    return ['error' => 'That manual GCash payment could not be found.', 'status' => 404];
+                }
+                $transaction = &$state['transactions'][$index];
+                if (($transaction['status'] ?? '') !== 'pending') {
+                    return ['error' => 'That GCash payment has already been updated.', 'status' => 409];
+                }
+                if ($action === 'cancel_gcash_payment') {
+                    $transaction['status'] = 'cancelled';
+                    $transaction['cancelled_at'] = date(DATE_ATOM);
+                    return ['success' => true];
+                }
+                foreach ($transaction['items'] as $item) {
+                    $found = findProduct($state, $item['id']);
+                    if ($found === null || $state['products'][$found[0]]['stock'] < $item['quantity']) {
+                        return ['error' => 'There is not enough stock to confirm this payment. Restock the items or cancel the order.', 'status' => 409];
+                    }
+                }
+                foreach ($transaction['items'] as $item) {
+                    $found = findProduct($state, $item['id']);
+                    $state['products'][$found[0]]['stock'] -= $item['quantity'];
+                }
+                $transaction['status'] = 'paid';
+                $transaction['confirmed_at'] = date(DATE_ATOM);
+                return ['success' => true];
+            });
+            if (isset($result['error'])) {
+                respond($result['status'], ['error' => $result['error']]);
+            }
+            respond(200, ['success' => true]);
+        }
+
+        if ($action === 'update_gcash_number') {
+            $submitted = $body['gcash_number'] ?? null;
+            if (!is_string($submitted)) {
+                respond(422, ['error' => 'Enter a valid Philippine mobile number.']);
+            }
+            $submitted = preg_replace('/[\s-]/', '', trim($submitted));
+            if (is_string($submitted) && preg_match('/^\+639[0-9]{9}$/', $submitted) === 1) {
+                $submitted = '0' . substr($submitted, 3);
+            }
+            if (!is_string($submitted) || preg_match('/^09[0-9]{9}$/', $submitted) !== 1) {
+                respond(422, ['error' => 'Enter an 11-digit number starting with 09 or a +63 number.']);
+            }
+            withStore(static function (array &$state) use ($submitted): void {
+                $state['gcash_number'] = $submitted;
+            });
+            respond(200, ['success' => true]);
+        }
 
         if (in_array($action, ['confirm_cash_order', 'cancel_cash_order'], true)) {
             $transactionId = $body['transaction_id'] ?? '';

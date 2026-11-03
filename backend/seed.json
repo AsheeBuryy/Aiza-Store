@@ -1,4 +1,5 @@
 {
+  "gcash_number": "09302846922",
   "products": [
     { "id": "coffee-3in1", "name": "3-in-1 Coffee", "category": "Coffee & Drinks", "price": 12, "stock": 42, "emoji": "☕", "description": "A warm little pick-me-up for any time of day." },
     { "id": "coffee-premix", "name": "Coffee Mix", "category": "Coffee & Drinks", "price": 15, "stock": 28, "emoji": "🧋", "description": "Creamy, comforting instant coffee." },

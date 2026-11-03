@@ -6,6 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
+    "build:demo": "tsc -b && vite build --mode demo",
+    "setup:database": "node --env-file=.env.setup scripts/setup-database.mjs",
+    "setup:admin": "node --env-file=.env.setup scripts/setup-admin.mjs",
+    "test:api": "node --test tests/netlify-api.test.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { readFileSync, renameSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
@@ -24,6 +24,8 @@ const env = readEnvironment();
 const sessions = new Map();
 const loginAttempts = new Map();
 const maxBodyBytes = 65536;
+const maxReceiptBytes = 2 * 1024 * 1024;
+const maxReceiptRequestBytes = 3 * 1024 * 1024;
 
 function ensureStore() {
   if (!existsSync(storeFile)) {
@@ -35,6 +37,7 @@ function ensureStore() {
 function withStore(callback) {
   ensureStore();
   const state = JSON.parse(readFileSync(storeFile, "utf8"));
+  state.gcash_number ??= "09302846922";
   const result = callback(state);
   mkdirSync(storageDirectory, { recursive: true });
   const temporaryFile = `${storeFile}.${process.pid}.tmp`;
@@ -50,13 +53,13 @@ function json(response, status, body) {
   response.end(JSON.stringify(body));
 }
 
-function readBody(request) {
+function readBody(request, limit = maxBodyBytes) {
   return new Promise((resolveBody, reject) => {
     let body = "";
     let size = 0;
     request.on("data", (chunk) => {
       size += chunk.length;
-      if (size > maxBodyBytes) {
+      if (size > limit) {
         reject(new Error("The request is too large."));
         request.destroy();
         return;
@@ -113,6 +116,17 @@ function transactionId(prefix) {
   return `${prefix}-${randomBytes(5).toString("hex").toUpperCase()}`;
 }
 
+function validateReceiptDataUrl(value) {
+  if (typeof value !== "string") return false;
+  const match = /^data:(image\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(value);
+  if (!match) return false;
+  const bytes = Buffer.from(match[2], "base64");
+  if (!bytes.length || bytes.length > maxReceiptBytes) return false;
+  if (match[1] === "image/jpeg") return bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  if (match[1] === "image/png") return bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+  return bytes.length >= 12 && bytes.toString("ascii", 0, 4) === "RIFF" && bytes.toString("ascii", 8, 12) === "WEBP";
+}
+
 function findProduct(state, id) {
   const index = state.products.findIndex((product) => product.id === id);
   return index === -1 ? null : { index, product: state.products[index] };
@@ -129,59 +143,27 @@ function dashboard(state) {
 
   return {
     products: state.products,
-    transactions: [...state.transactions].reverse(),
+    transactions: [...state.transactions].reverse().map((transaction) => {
+      const { submission_token_hash: submissionTokenHash, ...safeTransaction } = transaction;
+      return {
+        ...safeTransaction,
+        receipt_required: Boolean(submissionTokenHash),
+        receipt_url: transaction.receipt_data_url ?? null,
+      };
+    }),
+    gcash_number: state.gcash_number,
     stats: {
       today_sales: sum(todayTransactions, isSale),
       total_sales: sum(state.transactions, isSale),
       cash_in_today: sum(todayTransactions, (transaction) => transaction.type === "cash_in"),
       cash_out_today: sum(todayTransactions, (transaction) => transaction.type === "cash_out"),
       low_stock_count: state.products.filter((product) => product.stock <= 5).length,
-      pending_payments: state.transactions.filter((transaction) => transaction.type === "payment" && transaction.status === "pending").length,
+      pending_payments: state.transactions.filter((transaction) =>
+        transaction.type === "payment" && transaction.payment_method === "Manual GCash" && transaction.status === "pending",
+      ).length,
       pending_cash_orders: state.transactions.filter((transaction) => transaction.type === "cash_order" && transaction.status === "pending").length,
     },
   };
-}
-
-async function createPaymongoCheckout(items, amount, reference, appUrl) {
-  const secret = env.PAYMONGO_SECRET_KEY;
-  if (!secret) throw Object.assign(new Error("GCash checkout is not configured yet. Add the PayMongo secret key to the server environment and try again."), { status: 503 });
-  const response = await fetch("https://api.paymongo.com/v1/checkout_sessions", {
-    method: "POST",
-    headers: {
-      Authorization: `Basic ${Buffer.from(`${secret}:`).toString("base64")}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({
-      data: {
-        attributes: {
-          line_items: items.map((item) => ({
-            name: item.name,
-            quantity: item.quantity,
-            amount: Math.round(item.unit_price * 100),
-            currency: "PHP",
-          })),
-          payment_method_types: ["gcash"],
-          description: `Aiza Gabutan Chang Store order ${reference}`,
-          success_url: `${appUrl}/?payment=success&ref=${encodeURIComponent(reference)}`,
-          cancel_url: `${appUrl}/?payment=cancelled&ref=${encodeURIComponent(reference)}`,
-          metadata: { order_reference: reference },
-        },
-      },
-    }),
-    signal: AbortSignal.timeout(15000),
-  });
-  const result = await response.json();
-  if (!response.ok) {
-    console.error("PayMongo checkout request failed with status", response.status);
-    throw Object.assign(new Error("PayMongo could not start checkout. Check the merchant setup and try again."), { status: 502 });
-  }
-  const session = result?.data;
-  const checkoutUrl = session?.attributes?.checkout_url;
-  if (typeof session?.id !== "string" || typeof checkoutUrl !== "string" || new URL(checkoutUrl).protocol !== "https:") {
-    throw Object.assign(new Error("PayMongo returned an incomplete checkout response. Please try again."), { status: 502 });
-  }
-  return { checkoutId: session.id, checkoutUrl };
 }
 
 async function handleApi(request, response) {
@@ -193,7 +175,10 @@ async function handleApi(request, response) {
   response.setHeader("X-Frame-Options", "DENY");
 
   if (action === "products" && method === "GET") {
-    return withStore((state) => json(response, 200, { products: state.products }));
+    return withStore((state) => json(response, 200, {
+      products: state.products,
+      gcash_number: state.gcash_number,
+    }));
   }
 
   if (!verifySameOrigin(request)) return json(response, 403, { error: "This request did not come from the store website." });
@@ -267,6 +252,9 @@ async function handleApi(request, response) {
         transaction.status = "failed";
         return true;
       }
+      if (transaction.submission_token_hash && (!transaction.gcash_reference || !transaction.receipt_data_url)) {
+        return { error: "The customer has not submitted a GCash reference number and receipt yet.", status: 409 };
+      }
       const products = transaction.items.map((item) => findProduct(state, item.id));
       const canFulfill = products.every((product, index) => product && product.product.stock >= transaction.items[index].quantity);
       transaction.status = canFulfill ? "paid" : "paid_stock_issue";
@@ -291,11 +279,76 @@ async function handleApi(request, response) {
     return json(response, 200, { success: true });
   }
 
-  const adminActions = new Set(["cash_in", "cash_out", "restock", "add_product", "update_product", "record_sale", "confirm_cash_order", "cancel_cash_order"]);
+  if (method === "POST" && action === "submit_gcash_payment") {
+    const body = await readBody(request, maxReceiptRequestBytes);
+    if (typeof body.transaction_id !== "string" || !/^AIZA-[A-F0-9]{10}$/.test(body.transaction_id)
+        || typeof body.submission_token !== "string" || !/^[a-f0-9]{64}$/.test(body.submission_token)) {
+      return json(response, 422, { error: "The GCash order details are invalid. Please start checkout again." });
+    }
+    const gcashReference = typeof body.gcash_reference === "string" ? body.gcash_reference.trim() : "";
+    if (!/^[A-Za-z0-9-]{4,40}$/.test(gcashReference)) {
+      return json(response, 422, { error: "Enter the 4–40 character GCash transfer reference number." });
+    }
+    if (!validateReceiptDataUrl(body.receipt_data_url)) {
+      return json(response, 422, { error: "Choose a valid JPG, PNG, or WebP receipt image no larger than 2 MB." });
+    }
+    const result = withStore((state) => {
+      const transaction = state.transactions.find((entry) =>
+        entry.id === body.transaction_id
+        && entry.type === "payment"
+        && entry.payment_method === "Manual GCash"
+        && entry.status === "pending"
+        && entry.submission_token_hash === createHash("sha256").update(body.submission_token).digest("hex")
+        && !entry.receipt_data_url,
+      );
+      if (!transaction) return false;
+      transaction.gcash_reference = gcashReference;
+      transaction.receipt_data_url = body.receipt_data_url;
+      return true;
+    });
+    return result
+      ? json(response, 200, { success: true })
+      : json(response, 409, { error: "This GCash order is no longer available for receipt submission. Please contact the store." });
+  }
+
+  const adminActions = new Set(["cash_in", "cash_out", "restock", "add_product", "update_product", "record_sale", "confirm_cash_order", "cancel_cash_order", "confirm_gcash_payment", "cancel_gcash_payment", "update_gcash_number"]);
   if (method === "POST" && adminActions.has(action)) {
     if (!session.admin) return json(response, 401, { error: "Please sign in to manage the store." });
     if (request.headers["x-csrf-token"] !== session.csrfToken) return json(response, 403, { error: "Your session has expired. Please sign in again." });
     const body = await readBody(request);
+
+    if (action === "confirm_gcash_payment" || action === "cancel_gcash_payment") {
+      const result = withStore((state) => {
+        const transaction = state.transactions.find((entry) =>
+          entry.id === body.transaction_id && entry.type === "payment" && entry.payment_method === "Manual GCash",
+        );
+        if (!transaction) return { error: "That manual GCash payment could not be found.", status: 404 };
+        if (transaction.status !== "pending") return { error: "That GCash payment has already been updated.", status: 409 };
+        if (action === "cancel_gcash_payment") {
+          transaction.status = "cancelled";
+          transaction.cancelled_at = new Date().toISOString();
+          return { success: true };
+        }
+        const products = transaction.items.map((item) => findProduct(state, item.id));
+        if (products.some((product, index) => !product || product.product.stock < transaction.items[index].quantity)) {
+          return { error: "There is not enough stock to confirm this payment. Restock the items or cancel the order.", status: 409 };
+        }
+        transaction.items.forEach((item, index) => { products[index].product.stock -= item.quantity; });
+        transaction.status = "paid";
+        transaction.confirmed_at = new Date().toISOString();
+        return { success: true };
+      });
+      return result.error ? json(response, result.status, { error: result.error }) : json(response, 200, result);
+    }
+
+    if (action === "update_gcash_number") {
+      if (typeof body.gcash_number !== "string") return json(response, 422, { error: "Enter a valid Philippine mobile number." });
+      const submitted = body.gcash_number.trim().replace(/[\s-]/g, "");
+      const gcashNumber = /^\+639\d{9}$/.test(submitted) ? `0${submitted.slice(3)}` : submitted;
+      if (!/^09\d{9}$/.test(gcashNumber)) return json(response, 422, { error: "Enter an 11-digit number starting with 09 or a +63 number." });
+      withStore((state) => { state.gcash_number = gcashNumber; });
+      return json(response, 200, { success: true });
+    }
 
     if (action === "confirm_cash_order" || action === "cancel_cash_order") {
       const result = withStore((state) => {
@@ -456,24 +509,27 @@ async function handleApi(request, response) {
       }));
       return json(response, 201, { cash_order: true, reference });
     }
-    let checkout;
-    try {
-      checkout = await createPaymongoCheckout(items, amount, reference, (env.APP_URL ?? "http://localhost:5173").replace(/\/+$/, ""));
-    } catch (error) {
-      return json(response, error.status ?? 502, { error: error.message ?? "PayMongo could not be reached." });
-    }
+    const gcashNumber = withStore((state) => state.gcash_number);
+    const submissionToken = randomBytes(32).toString("hex");
     withStore((state) => state.transactions.push({
       id: reference,
-      checkout_id: checkout.checkoutId,
       type: "payment",
       status: "pending",
       amount,
-      description: `GCash checkout (${items.length} items)`,
-      payment_method: "PayMongo GCash",
+      description: `GCash transfer (${items.length} items)`,
+      payment_method: "Manual GCash",
       items,
       created_at: new Date().toISOString(),
+      gcash_reference: null,
+      submission_token_hash: createHash("sha256").update(submissionToken).digest("hex"),
     }));
-    return json(response, 200, { checkout_url: checkout.checkoutUrl, reference });
+    return json(response, 201, {
+      manual_gcash_order: true,
+      reference,
+      amount,
+      gcash_number: gcashNumber,
+      submission_token: submissionToken,
+    });
   }
 
   if (method !== "GET" && method !== "POST") {

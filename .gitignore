@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-demo/
+.netlify/
+.env
+.env.*
+!.env.example
+!.env.demo
+!.env.setup.example
+backend/data/store.json
+storage/
+*.log

@@ -1,4 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import catalog from "../backend/seed.json";
+
+const DEMO_MODE = import.meta.env.MODE === "demo";
 
 type Product = {
   id: string;
@@ -19,11 +22,22 @@ type Transaction = {
   description: string;
   created_at: string;
   payment_method: string;
+  gcash_reference?: string | null;
+  receipt_url?: string | null;
+  receipt_required?: boolean;
+};
+
+type PendingGcashOrder = {
+  reference: string;
+  amount: number;
+  gcash_number: string;
+  submission_token: string;
 };
 
 type AdminData = {
   products: Product[];
   transactions: Transaction[];
+  gcash_number: string;
   stats: {
     today_sales: number;
     total_sales: number;
@@ -35,7 +49,7 @@ type AdminData = {
   };
 };
 
-type StoreData = { products: Product[] };
+type StoreData = { products: Product[]; gcash_number: string };
 
 const peso = new Intl.NumberFormat("en-PH", {
   style: "currency",
@@ -52,13 +66,26 @@ async function apiRequest<T>(action: string, options?: RequestInit): Promise<T> 
       ...(options?.headers ?? {}),
     },
   });
-  const result = (await response.json()) as T & { error?: string };
-  if (!response.ok) throw new Error(result.error ?? "The request could not be completed.");
+  const contentType = response.headers.get("content-type") ?? "";
+  const responseBody = await response.text();
+  let result: (T & { error?: string }) | null;
+  try {
+    result = JSON.parse(responseBody) as (T & { error?: string }) | null;
+  } catch {
+    throw new Error(
+      `The store API returned a non-JSON response (HTTP ${response.status}${contentType ? `, ${contentType}` : ""}). Check the Netlify API deployment and function configuration.`,
+    );
+  }
+  if (!response.ok) throw new Error(result?.error ?? "The request could not be completed.");
+  if (result === null || typeof result !== "object") {
+    throw new Error("The store API returned an empty response. Please check the server configuration.");
+  }
   return result;
 }
 
 function App() {
   const [products, setProducts] = useState<Product[]>([]);
+  const [gcashNumber, setGcashNumber] = useState("");
   const [cart, setCart] = useState<CartLine[]>([]);
   const [category, setCategory] = useState("All items");
   const [search, setSearch] = useState("");
@@ -67,6 +94,7 @@ function App() {
   const [notice, setNotice] = useState("");
   const [checkoutBusy, setCheckoutBusy] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<"cash" | "gcash">("cash");
+  const [gcashOrder, setGcashOrder] = useState<PendingGcashOrder | null>(null);
   const [showLogin, setShowLogin] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [admin, setAdmin] = useState<AdminData | null>(null);
@@ -80,6 +108,7 @@ function App() {
     try {
       const result = await apiRequest<StoreData>("products");
       setProducts(result.products);
+      setGcashNumber(result.gcash_number);
     } catch (error) {
       setStoreError(error instanceof Error ? error.message : "Unable to load store products.");
     } finally {
@@ -92,6 +121,7 @@ function App() {
       const result = await apiRequest<AdminData>("admin");
       setAdmin(result);
       setProducts(result.products);
+      setGcashNumber(result.gcash_number);
       setAdminError("");
     } catch (error) {
       setAdminError(error instanceof Error ? error.message : "Unable to load the admin dashboard.");
@@ -99,15 +129,14 @@ function App() {
   }
 
   useEffect(() => {
+    if (DEMO_MODE) {
+      setProducts(catalog.products);
+      setLoading(false);
+      return;
+    }
     void loadProducts();
     const params = new URLSearchParams(window.location.search);
-    if (params.get("payment") === "success") {
-      setNotice("Thanks! PayMongo is confirming your GCash payment. The store record updates after provider confirmation.");
-      window.history.replaceState({}, "", window.location.pathname);
-    } else if (params.get("payment") === "cancelled") {
-      setNotice("Checkout was cancelled. Your basket is still here if you’d like to try again.");
-      window.history.replaceState({}, "", window.location.pathname);
-    }
+    if (params.has("payment")) window.history.replaceState({}, "", window.location.pathname);
   }, []);
 
   const categories = useMemo(
@@ -130,6 +159,7 @@ function App() {
   const cartTotal = cart.reduce((sum, line) => sum + line.product.price * line.quantity, 0);
 
   function addToCart(product: Product) {
+    if (gcashOrder) return;
     setNotice("");
     setCart((current) => {
       const existing = current.find((line) => line.product.id === product.id);
@@ -147,6 +177,7 @@ function App() {
   }
 
   function adjustCart(productId: string, delta: number) {
+    if (gcashOrder) return;
     setCart((current) =>
       current
         .map((line) =>
@@ -163,30 +194,88 @@ function App() {
     setCheckoutBusy(true);
     setNotice("");
     try {
-      const result = await apiRequest<{ checkout_url?: string; cash_order?: boolean }>("checkout", {
+      const result = await apiRequest<{
+        cash_order?: boolean;
+        manual_gcash_order?: boolean;
+        reference?: string;
+        amount?: number;
+        gcash_number?: string;
+        submission_token?: string;
+      }>("checkout", {
         method: "POST",
         body: JSON.stringify({
           payment_method: paymentMethod,
           items: cart.map(({ product, quantity }) => ({ id: product.id, quantity })),
         }),
       });
-      if (paymentMethod === "gcash" && result.checkout_url) {
-        window.location.assign(result.checkout_url);
-        return;
-      }
       if (paymentMethod === "cash" && result.cash_order) {
         setCart([]);
         setNotice("Cash order placed! Please pay at the store counter when you pick up your items.");
         await loadProducts();
-        return;
+      } else if (paymentMethod === "gcash" && result.manual_gcash_order && result.reference
+          && result.amount && result.gcash_number && result.submission_token) {
+        setGcashOrder({
+          reference: result.reference,
+          amount: result.amount,
+          gcash_number: result.gcash_number,
+          submission_token: result.submission_token,
+        });
+        setNotice("");
+      } else {
+        throw new Error("The checkout response was incomplete. Please try again.");
       }
-      throw new Error("The checkout response was incomplete. Please try again.");
     } catch (error) {
       setNotice(error instanceof Error ? error.message : "Unable to complete checkout.");
+    } finally {
       setCheckoutBusy(false);
+    }
+  }
+
+  async function submitGcashPayment(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!gcashOrder || checkoutBusy) return;
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+    const reference = formData.get("gcash_reference");
+    const receipt = formData.get("receipt");
+    if (!(receipt instanceof File) || receipt.size === 0) {
+      setNotice("Choose a screenshot of your GCash receipt.");
       return;
     }
-    setCheckoutBusy(false);
+    if (receipt.size > 2 * 1024 * 1024) {
+      setNotice("Receipt images must be no larger than 2 MB.");
+      return;
+    }
+
+    setCheckoutBusy(true);
+    setNotice("");
+    try {
+      const receiptDataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => typeof reader.result === "string"
+          ? resolve(reader.result)
+          : reject(new Error("The receipt image could not be read."));
+        reader.onerror = () => reject(new Error("The receipt image could not be read."));
+        reader.readAsDataURL(receipt);
+      });
+      await apiRequest("submit_gcash_payment", {
+        method: "POST",
+        body: JSON.stringify({
+          transaction_id: gcashOrder.reference,
+          submission_token: gcashOrder.submission_token,
+          gcash_reference: String(reference ?? ""),
+          receipt_data_url: receiptDataUrl,
+        }),
+      });
+      setCart([]);
+      setGcashOrder(null);
+      form.reset();
+      setNotice(`Your GCash reference and receipt for order ${gcashOrder.reference} were sent to the store. The admin will verify the payment before confirming your order.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Your receipt could not be submitted.");
+    } finally {
+      setCheckoutBusy(false);
+    }
   }
 
   async function handleLogin(event: FormEvent<HTMLFormElement>) {
@@ -259,8 +348,8 @@ function App() {
         <nav className="main-nav" aria-label="Main navigation">
           <a href="#shop">Shop</a>
           <a href="#about">About us</a>
-          <button className="nav-login" onClick={() => setShowLogin(true)}>Admin login</button>
-          {isAdmin && <button className="nav-admin" onClick={() => void loadAdmin()}>Dashboard</button>}
+          {!DEMO_MODE && <button className="nav-login" onClick={() => setShowLogin(true)}>Admin login</button>}
+          {!DEMO_MODE && isAdmin && <button className="nav-admin" onClick={() => void loadAdmin()}>Dashboard</button>}
         </nav>
         <a className="cart-pill" href="#basket" aria-label={`Basket with ${cartCount} items`}>
           <span aria-hidden="true">🛍</span>
@@ -275,6 +364,8 @@ function App() {
           <button aria-label="Dismiss notice" onClick={() => setNotice("")}>×</button>
         </div>
       )}
+
+      {DEMO_MODE && <div className="demo-banner" role="status">Public demo preview — sample products only; admin login, orders, inventory changes, and payments are disabled.</div>}
 
       {isAdmin ? (
         <AdminDashboard
@@ -317,7 +408,7 @@ function App() {
             <section className="trust-strip" aria-label="Store features">
               <div><span>🏡</span><p><strong>Your neighborhood store</strong><small>Familiar faces, everyday essentials</small></p></div>
               <div><span>💸</span><p><strong>Presyong kaibigan</strong><small>Everyday prices for everyone</small></p></div>
-              <div><span>📱</span><p><strong>GCash checkout</strong><small>Pay securely with PayMongo</small></p></div>
+              <div><span>{DEMO_MODE ? "👀" : "📱"}</span><p><strong>{DEMO_MODE ? "Public demo preview" : "GCash transfers"}</strong><small>{DEMO_MODE ? "Browsing only — no orders or payments" : "Transfer to the store; admin verifies payment"}</small></p></div>
             </section>
 
             <section className="shop-section" id="shop">
@@ -357,7 +448,7 @@ function App() {
                           <div className="product-info">
                             <div className="product-name-row"><h4>{product.name}</h4><strong>{peso.format(product.price)}</strong></div>
                             <p>{product.description}</p>
-                            <button className="add-button" onClick={() => addToCart(product)} disabled={product.stock < 1}>
+                            <button className="add-button" onClick={() => addToCart(product)} disabled={product.stock < 1 || Boolean(gcashOrder)}>
                               <span>＋</span> Add to basket
                             </button>
                           </div>
@@ -382,15 +473,37 @@ function App() {
                           <span className="basket-item-icon">{product.emoji}</span>
                           <span className="basket-item-name">{product.name}<small>{peso.format(product.price)} each</small></span>
                           <div className="quantity-control">
-                            <button aria-label={`Remove one ${product.name}`} onClick={() => adjustCart(product.id, -1)}>−</button>
+                            <button aria-label={`Remove one ${product.name}`} onClick={() => adjustCart(product.id, -1)} disabled={Boolean(gcashOrder)}>−</button>
                             <span>{quantity}</span>
-                            <button aria-label={`Add one ${product.name}`} onClick={() => adjustCart(product.id, 1)}>+</button>
+                            <button aria-label={`Add one ${product.name}`} onClick={() => adjustCart(product.id, 1)} disabled={Boolean(gcashOrder)}>+</button>
                           </div>
                           <strong>{peso.format(product.price * quantity)}</strong>
                         </div>
                       ))}
                     </div>
                     <div className="basket-total"><span>Total</span><strong>{peso.format(cartTotal)}</strong></div>
+                    {DEMO_MODE ? (
+                      <p className="demo-checkout-notice">This public preview is for browsing only. No order or payment will be submitted.</p>
+                    ) : <>
+                    {gcashOrder ? (
+                      <form className="gcash-payment-form" onSubmit={(event) => void submitGcashPayment(event)}>
+                        <div className="gcash-payment-instructions">
+                          <strong>Send {peso.format(gcashOrder.amount)} to GCash</strong>
+                          <a href={`tel:${gcashOrder.gcash_number}`}>{gcashOrder.gcash_number}</a>
+                          <small>Order reference: {gcashOrder.reference}. After paying, enter the GCash transfer reference number and attach your receipt screenshot.</small>
+                        </div>
+                        <label>GCash transfer reference number
+                          <input name="gcash_reference" autoComplete="off" minLength={4} maxLength={40} pattern="[A-Za-z0-9-]{4,40}" required />
+                        </label>
+                        <label>Receipt screenshot (JPG, PNG, or WebP; up to 2 MB)
+                          <input name="receipt" type="file" accept="image/jpeg,image/png,image/webp" required />
+                        </label>
+                        <button className="checkout-button" type="submit" disabled={checkoutBusy}>
+                          {checkoutBusy ? "Sending receipt..." : "Submit payment details"} <span>→</span>
+                        </button>
+                        <p className="checkout-caption">Your order remains pending until the store verifies your transfer. Do not send your GCash MPIN or OTP.</p>
+                      </form>
+                    ) : <>
                     <fieldset className="payment-methods" disabled={checkoutBusy}>
                       <legend>How would you like to pay?</legend>
                       <label className={paymentMethod === "cash" ? "payment-option selected" : "payment-option"}>
@@ -402,14 +515,21 @@ function App() {
                       <label className={paymentMethod === "gcash" ? "payment-option selected" : "payment-option"}>
                         <input type="radio" name="payment-method" value="gcash" checked={paymentMethod === "gcash"} onChange={() => setPaymentMethod("gcash")} />
                         <span className="payment-icon">📱</span>
-                        <span className="payment-copy"><strong>GCash</strong><small>Pay securely online with PayMongo</small></span>
+                        <span className="payment-copy"><strong>GCash transfer</strong><small>Send payment to the store’s GCash number</small></span>
                         <span className="payment-check" aria-hidden="true">✓</span>
                       </label>
                     </fieldset>
                     <button className="checkout-button" onClick={() => void startCheckout()} disabled={checkoutBusy}>
                       {checkoutBusy ? "Preparing your order..." : paymentMethod === "cash" ? "Place cash order" : "Continue with GCash"} <span>→</span>
                     </button>
-                    <p className="checkout-caption">{paymentMethod === "cash" ? "Your cash order is confirmed by the store when payment is made at the counter." : "Secure checkout by PayMongo. Payment is confirmed by the provider."}</p>
+                    <p className="checkout-caption">{paymentMethod === "cash" ? "Your cash order is confirmed by the store when payment is made at the counter." : "Transfer the total to the store’s GCash number. The store will verify payment before confirming your order."}</p>
+                    {paymentMethod === "gcash" && gcashNumber && (
+                      <p className="checkout-caption">
+                        GCash number: <a href={`tel:${gcashNumber}`}>{gcashNumber}</a>. The transfer reference and receipt upload appear after placing your order.
+                      </p>
+                    )}
+                    </>}
+                    </>}
                   </>
                 )}
               </div>
@@ -427,7 +547,7 @@ function App() {
         </>
       )}
 
-      {showLogin && (
+      {!DEMO_MODE && showLogin && (
         <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowLogin(false); }}>
           <section className="login-modal" role="dialog" aria-modal="true" aria-labelledby="login-title">
             <button className="modal-close" aria-label="Close admin login" onClick={() => setShowLogin(false)}>×</button>
@@ -521,10 +641,21 @@ function AdminDashboard({
                 <section className="panel">
                   <div className="panel-heading"><div><span className="eyebrow">A LITTLE CHECK-IN</span><h2>Stock to watch</h2></div><span className="panel-icon">📦</span></div>
                   {lowStock.length === 0 ? <p className="quiet-note">All the shelves are looking good.</p> : lowStock.map((product) => <div className="low-stock-row" key={product.id}><span>{product.emoji}</span><div><strong>{product.name}</strong><small>{product.stock} left on the shelf</small></div><span className="stock-badge">{product.stock} left</span></div>)}
-                  <p className="stock-footnote">{data.stats.pending_payments} online GCash payment{data.stats.pending_payments === 1 ? "" : "s"} awaiting provider confirmation. {data.stats.pending_cash_orders} cash order{data.stats.pending_cash_orders === 1 ? "" : "s"} await payment at the counter.</p>
+                  <p className="stock-footnote">{data.stats.pending_payments} GCash payment{data.stats.pending_payments === 1 ? "" : "s"} awaiting verification. {data.stats.pending_cash_orders} cash order{data.stats.pending_cash_orders === 1 ? "" : "s"} await payment at the counter.</p>
                 </section>
               </div>
               {data.stats.pending_cash_orders > 0 && <PendingCashOrders transactions={data.transactions} onAction={onAction} />}
+              {data.stats.pending_payments > 0 && <PendingGcashPayments transactions={data.transactions} onAction={onAction} />}
+              <section className="panel gcash-settings-panel">
+                <div className="panel-heading"><div><span className="eyebrow">CUSTOMER CONTACT</span><h2>GCash contact number</h2></div><span className="panel-icon">📱</span></div>
+                <form key={data.gcash_number} className="inline-form gcash-settings-form" onSubmit={(event) => { event.preventDefault(); onAction("update_gcash_number", event.currentTarget); }}>
+                  <label>Number shown to customers
+                    <input name="gcash_number" type="tel" inputMode="tel" autoComplete="tel" defaultValue={data.gcash_number} pattern="(09[0-9]{9}|[+]639[0-9]{9})" maxLength={13} required />
+                  </label>
+                  <button className="checkout-button" type="submit">Save contact number</button>
+                </form>
+                <p className="transactions-note">Customers transfer order payments to this number. Verify each incoming transfer before confirming its order.</p>
+              </section>
               <section className="panel admin-operations">
                 <div className="panel-heading"><div><span className="eyebrow">AT THE COUNTER</span><h2>Record a store transaction</h2></div><span className="panel-icon">🧾</span></div>
                 <div className="operation-grid">
@@ -594,8 +725,9 @@ function AdminDashboard({
           {activeTab === "transactions" && (
             <>
               {data.stats.pending_cash_orders > 0 && <PendingCashOrders transactions={data.transactions} onAction={onAction} />}
+              {data.stats.pending_payments > 0 && <PendingGcashPayments transactions={data.transactions} onAction={onAction} />}
               <section className="panel transactions-panel"><div className="panel-heading"><div><span className="eyebrow">THE STORE'S PAPER TRAIL</span><h2>Transactions & sales</h2></div><button className="secondary-button export-button" onClick={exportCsv}>↓ Export CSV</button></div>
-                <p className="transactions-note">GCash payments are confirmed by PayMongo. Cash orders are recorded as sales only after you receive payment at the counter. Cash-in and cash-out are store records, not automatic wallet transfers.</p>
+                <p className="transactions-note">Confirm a GCash transfer only after verifying that payment reached the store wallet. Cash orders are recorded as sales only after you receive payment at the counter. Cash-in and cash-out are store records, not automatic wallet transfers.</p>
                 <TransactionTable transactions={data.transactions} expanded />
               </section>
             </>
@@ -626,6 +758,36 @@ function PendingCashOrders({ transactions, onAction }: { transactions: Transacti
         </div>
       ))}</div>
       <p className="transactions-note">Confirm only after the customer has paid. Inventory and sales totals update when you confirm.</p>
+    </section>
+  );
+}
+
+function PendingGcashPayments({ transactions, onAction }: { transactions: Transaction[]; onAction: (action: string, form: HTMLFormElement) => void }) {
+  const orders = transactions.filter((transaction) =>
+    transaction.type === "payment" && transaction.payment_method === "Manual GCash" && transaction.status === "pending",
+  );
+  if (orders.length === 0) return null;
+  return (
+    <section className="panel pending-orders-panel">
+      <div className="panel-heading"><div><span className="eyebrow">VERIFY TRANSFERS</span><h2>GCash payments to confirm</h2></div><span className="inventory-count">{orders.length} awaiting verification</span></div>
+      <div className="pending-order-list">{orders.map((order) => (
+        <div className="pending-order" key={order.id}>
+          <div className="pending-order-info"><strong>{order.description}</strong><small>{order.id} · {peso.format(order.amount)} · {new Date(order.created_at).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" })}</small></div>
+          {order.receipt_required && (
+            <div className="pending-gcash-proof">
+              <strong>GCash reference: {order.gcash_reference || "Not submitted"}</strong>
+              {order.receipt_url
+                ? <a href={order.receipt_url} target="_blank" rel="noopener noreferrer">View customer receipt ↗</a>
+                : <small>Customer receipt not submitted</small>}
+            </div>
+          )}
+          <div className="pending-order-actions">
+            <form onSubmit={(event) => { event.preventDefault(); onAction("confirm_gcash_payment", event.currentTarget); }}><input type="hidden" name="transaction_id" value={order.id} /><button className="order-confirm-button" type="submit" disabled={Boolean(order.receipt_required && (!order.gcash_reference || !order.receipt_url))}>Confirm transfer received</button></form>
+            <form onSubmit={(event) => { event.preventDefault(); onAction("cancel_gcash_payment", event.currentTarget); }}><input type="hidden" name="transaction_id" value={order.id} /><button className="order-cancel-button" type="submit">Cancel order</button></form>
+          </div>
+        </div>
+      ))}</div>
+      <p className="transactions-note">Verify the transfer in the GCash wallet before confirming. Inventory and sales totals update only after confirmation.</p>
     </section>
   );
 }

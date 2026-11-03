@@ -40,6 +40,7 @@ button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible
 .cart-pill b { display: grid; place-items: center; width: 19px; height: 19px; border-radius: 50%; background: #e9eee6; color: var(--green); font-size: 10px; }
 .notice { position: relative; z-index: 3; display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 11px max(calc((100vw - 1180px) / 2), 6.2vw); background: #eef3e9; color: #315844; font-size: 12px; }
 .notice button { flex: 0 0 auto; border: 0; background: transparent; cursor: pointer; font-size: 20px; line-height: 1; }
+.demo-banner { padding: 10px 5%; background: #fff2d8; color: #725525; font-size: 11px; font-weight: 700; text-align: center; }
 
 .hero { max-width: 1180px; min-height: 505px; display: grid; grid-template-columns: 1fr .96fr; align-items: center; margin: 0 auto; padding: 62px 0 56px; }
 .hero-copy { padding: 10px 0 10px 24px; }
@@ -166,6 +167,16 @@ h1, h2, h3, p { margin-top: 0; }
 .checkout-button { width: 100%; min-height: 44px; justify-content: space-between; padding: 12px 15px; }
 .checkout-button:disabled { opacity: .65; cursor: wait; }
 .checkout-caption { margin: 9px 0 0; color: #8b8f85; font-size: 9px; text-align: center; }
+.checkout-caption a { color: var(--green); font-weight: 700; }
+.gcash-payment-form { display: grid; gap: 12px; margin-top: 16px; }
+.gcash-payment-form label { display: grid; gap: 6px; color: #596157; font-size: 10px; font-weight: 700; }
+.gcash-payment-form input:not([type="file"]) { width: 100%; height: 40px; padding: 0 10px; border: 1px solid #e3e1d8; border-radius: 4px; background: #fffefa; font-size: 11px; }
+.gcash-payment-form input[type="file"] { width: 100%; font-size: 10px; }
+.gcash-payment-instructions { display: grid; gap: 6px; padding: 13px; border: 1px solid #e5e9dd; border-radius: 5px; background: #f5f7f1; text-align: center; }
+.gcash-payment-instructions strong { color: var(--green); font-size: 11px; }
+.gcash-payment-instructions a { color: var(--green); font: 600 21px var(--serif); }
+.gcash-payment-instructions small { color: #737b70; font-size: 9px; line-height: 1.6; }
+.demo-checkout-notice { margin: 16px 0 0; padding: 13px; border: 1px solid #eee5cf; border-radius: 5px; background: #fffbf0; color: #756448; font-size: 10px; line-height: 1.6; text-align: center; }
 
 .about-section { max-width: 860px; display: grid; grid-template-columns: 185px 1fr; align-items: center; gap: 42px; margin: 0 auto; padding: 88px 0; }
 .about-mark { position: relative; width: 150px; height: 150px; display: grid; place-items: center; border: 1px solid #e1e5d9; border-radius: 50%; background: #eff1e9; color: var(--green); font: 600 76px var(--serif); transform: rotate(-9deg); }
@@ -270,8 +281,15 @@ tbody tr:last-child td { border-bottom: 0; }
 .pending-order-actions { display: flex; align-items: center; gap: 8px; }
 .pending-order-actions form { margin: 0; }
 .order-confirm-button, .order-cancel-button { border: 1px solid #dfe6da; border-radius: 4px; padding: 8px 9px; background: #f5f7f1; color: var(--green); font-size: 9px; font-weight: 700; cursor: pointer; }
+.order-confirm-button:disabled { opacity: .5; cursor: not-allowed; }
+.pending-gcash-proof { display: grid; gap: 5px; margin: 0 auto 0 0; font-size: 10px; }
+.pending-gcash-proof a { color: var(--green); font-size: 9px; font-weight: 700; }
+.pending-gcash-proof small { color: #858a80; font-size: 9px; }
 .order-cancel-button { border-color: #ece3dd; background: #fffefa; color: #956b58; }
 .transactions-note { margin: -5px 0 15px; color: #858a80; font-size: 10px; line-height: 1.6; }
+.gcash-settings-panel { margin-top: 20px; }
+.gcash-settings-form { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
+.gcash-settings-form .checkout-button { min-width: 190px; }
 .export-button { flex: 0 0 auto; }
 
 @media (max-width: 1220px) {
